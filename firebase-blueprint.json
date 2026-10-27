@@ -1,0 +1,194 @@
+{
+  "entities": {
+    "organisation": {
+      "title": "Organisation",
+      "description": "Tenant employer organisation operating in a specific industry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 128 },
+        "industry": { "type": "string", "enum": ["construction", "college_facilities", "hospital_support", "factory"] },
+        "timezone": { "type": "string", "maxLength": 64 },
+        "policyVersion": { "type": "string", "maxLength": 32 },
+        "currentRosterVersion": { "type": "number" }
+      },
+      "required": ["id", "name", "industry", "timezone", "policyVersion", "currentRosterVersion"]
+    },
+    "policy": {
+      "title": "Policy",
+      "description": "Scheduling, rest, and overtime budget policy parameters",
+      "type": "object",
+      "properties": {
+        "minimumRestMinutes": { "type": "number" },
+        "maximumWorkMinutesInWindow": { "type": "number" },
+        "windowStart": { "type": "string", "maxLength": 64 },
+        "windowEnd": { "type": "string", "maxLength": 64 },
+        "overtimeThresholdMinutesPerShift": { "type": "number" },
+        "overtimeMultiplierNumerator": { "type": "number" },
+        "overtimeMultiplierDenominator": { "type": "number" },
+        "budgetMode": { "type": "string", "enum": ["strict", "flexible", "warning"] },
+        "budgetCapPaise": { "type": "number" }
+      },
+      "required": [
+        "minimumRestMinutes",
+        "maximumWorkMinutesInWindow",
+        "overtimeThresholdMinutesPerShift",
+        "overtimeMultiplierNumerator",
+        "overtimeMultiplierDenominator",
+        "budgetMode",
+        "budgetCapPaise"
+      ]
+    },
+    "worker": {
+      "title": "Worker",
+      "description": "Registered worker with qualification tags and declared availability",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "organisationId": { "type": "string", "maxLength": 64 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "eligibleRoles": { "type": "array" },
+        "trainingTags": { "type": "array" },
+        "availabilityIntervals": { "type": "array" },
+        "preferredIntervals": { "type": "array" },
+        "baseHourlyRatePaise": { "type": "number" }
+      },
+      "required": ["id", "organisationId", "displayName", "eligibleRoles", "trainingTags", "availabilityIntervals", "baseHourlyRatePaise"]
+    },
+    "shiftRequirement": {
+      "title": "ShiftRequirement",
+      "description": "Employer shift demand requirement slot",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "organisationId": { "type": "string", "maxLength": 64 },
+        "role": { "type": "string", "maxLength": 64 },
+        "startUtc": { "type": "string", "maxLength": 64 },
+        "endUtc": { "type": "string", "maxLength": 64 },
+        "unpaidBreakMinutes": { "type": "number" },
+        "requiredTrainingTags": { "type": "array" },
+        "headcount": { "type": "number" }
+      },
+      "required": ["id", "organisationId", "role", "startUtc", "endUtc", "unpaidBreakMinutes", "headcount"]
+    },
+    "assignment": {
+      "title": "Assignment",
+      "description": "Allocated shift assignment linking worker and requirement",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "organisationId": { "type": "string", "maxLength": 64 },
+        "workerId": { "type": "string", "maxLength": 64 },
+        "shiftRequirementId": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["draft", "proposed", "confirmed", "disputed", "cancelled"] },
+        "version": { "type": "number" },
+        "expectedPayPaise": { "type": "number" }
+      },
+      "required": ["id", "workerId", "shiftRequirementId", "status", "version", "expectedPayPaise"]
+    },
+    "proposal": {
+      "title": "Proposal",
+      "description": "Roster change proposal with trade-offs and worker feedback responses",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "organisationId": { "type": "string", "maxLength": 64 },
+        "version": { "type": "number" },
+        "baseRosterVersion": { "type": "number" },
+        "changes": { "type": "array" },
+        "impactSummary": { "type": "object" },
+        "status": { "type": "string", "enum": ["DRAFT", "AWAITING_WORKER", "READY_TO_FINALISE", "FINALISED", "DECLINED", "CANCELLED"] },
+        "affectedWorkerIds": { "type": "array" },
+        "workerResponses": { "type": "object" },
+        "paidAdjustments": { "type": "array" }
+      },
+      "required": ["id", "organisationId", "version", "baseRosterVersion", "changes", "impactSummary", "status", "affectedWorkerIds"]
+    },
+    "attendanceSession": {
+      "title": "AttendanceSession",
+      "description": "Clocked shift attendance session with recorded duration and pay",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "organisationId": { "type": "string", "maxLength": 64 },
+        "workerId": { "type": "string", "maxLength": 64 },
+        "shiftRequirementId": { "type": "string", "maxLength": 64 },
+        "startUtc": { "type": "string", "maxLength": 64 },
+        "endUtc": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["IN_PROGRESS", "COMPLETED"] },
+        "recordedMinutes": { "type": "number" },
+        "recordedPayPaise": { "type": "number" }
+      },
+      "required": ["id", "organisationId", "workerId", "shiftRequirementId", "startUtc", "status"]
+    },
+    "auditEvent": {
+      "title": "AuditEvent",
+      "description": "Immutable audit record tracking change actor, reason, and delta",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "organisationId": { "type": "string", "maxLength": 64 },
+        "actorId": { "type": "string", "maxLength": 64 },
+        "action": { "type": "string", "maxLength": 64 },
+        "entityId": { "type": "string", "maxLength": 64 },
+        "timestamp": { "type": "string", "maxLength": 64 },
+        "before": { "type": "object" },
+        "after": { "type": "object" },
+        "reason": { "type": "string", "maxLength": 512 }
+      },
+      "required": ["id", "organisationId", "actorId", "action", "entityId", "timestamp"]
+    },
+    "userProfile": {
+      "title": "UserProfile",
+      "description": "User profile mapping authenticated UID to organisation and role",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "organisationId": { "type": "string", "maxLength": 64 },
+        "role": { "type": "string", "enum": ["employer", "worker"] },
+        "workerId": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "organisationId", "role"]
+    }
+  },
+  "firestore": {
+    "/organisations/{organisationId}": {
+      "schema": "organisation",
+      "description": "Registered organisations"
+    },
+    "/organisations/{organisationId}/policies/{policyId}": {
+      "schema": "policy",
+      "description": "Organisation scheduling policies"
+    },
+    "/organisations/{organisationId}/workers/{workerId}": {
+      "schema": "worker",
+      "description": "Workers registered in organisation"
+    },
+    "/organisations/{organisationId}/shiftRequirements/{shiftRequirementId}": {
+      "schema": "shiftRequirement",
+      "description": "Shift requirements"
+    },
+    "/organisations/{organisationId}/assignments/{assignmentId}": {
+      "schema": "assignment",
+      "description": "Shift assignments"
+    },
+    "/organisations/{organisationId}/proposals/{proposalId}": {
+      "schema": "proposal",
+      "description": "Schedule change proposals"
+    },
+    "/organisations/{organisationId}/attendanceSessions/{sessionId}": {
+      "schema": "attendanceSession",
+      "description": "Clocked attendance logs"
+    },
+    "/organisations/{organisationId}/auditEvents/{auditEventId}": {
+      "schema": "auditEvent",
+      "description": "Audit trail log"
+    },
+    "/users/{userId}": {
+      "schema": "userProfile",
+      "description": "Authenticated user memberships and roles"
+    }
+  }
+}

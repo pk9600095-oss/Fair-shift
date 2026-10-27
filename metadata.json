@@ -1,0 +1,6 @@
+{
+  "name": "FairShift",
+  "description": "Mobile-first workforce staffing and fair rostering platform aligning employer requirements with worker rest, availability, and earnings transparency.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

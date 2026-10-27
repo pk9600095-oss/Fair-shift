@@ -1,0 +1,117 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isMemberOf(orgId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        getUserData().organisationId == orgId;
+    }
+
+    function isEmployer(orgId) {
+      return isMemberOf(orgId) && getUserData().role == 'employer';
+    }
+
+    function isWorker(orgId) {
+      return isMemberOf(orgId) && getUserData().role == 'worker';
+    }
+
+    function isSelfWorker(orgId, workerId) {
+      return isWorker(orgId) && getUserData().workerId == workerId;
+    }
+
+    // User profiles: each user can read their own profile; creation if authenticated and uid matches
+    match /users/{userId} {
+      allow get: if isSignedIn() && request.auth.uid == userId;
+      allow create: if isSignedIn() && request.auth.uid == userId &&
+        request.resource.data.id == userId &&
+        request.resource.data.keys().hasAll(['id', 'organisationId', 'role']) &&
+        request.resource.data.role in ['employer', 'worker'];
+      allow update: if isSignedIn() && request.auth.uid == userId &&
+        request.resource.data.id == userId &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.organisationId == resource.data.organisationId;
+    }
+
+    // Organisations
+    match /organisations/{orgId} {
+      allow get: if isMemberOf(orgId);
+      allow create: if isSignedIn() && isValidId(orgId);
+      allow update: if isEmployer(orgId);
+
+      // Policies
+      match /policies/{policyId} {
+        allow read: if isMemberOf(orgId);
+        allow write: if isEmployer(orgId);
+      }
+
+      // Workers
+      match /workers/{workerId} {
+        allow read: if isEmployer(orgId) || isSelfWorker(orgId, workerId);
+        allow create, delete: if isEmployer(orgId);
+        allow update: if isEmployer(orgId) || (
+          isSelfWorker(orgId, workerId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['availabilityIntervals', 'preferredIntervals'])
+        );
+      }
+
+      // Shift requirements
+      match /shiftRequirements/{shiftId} {
+        allow read: if isMemberOf(orgId);
+        allow write: if isEmployer(orgId);
+      }
+
+      // Assignments
+      match /assignments/{assignmentId} {
+        allow read: if isEmployer(orgId) || (isWorker(orgId) && resource.data.workerId == getUserData().workerId);
+        allow write: if isEmployer(orgId);
+      }
+
+      // Proposals
+      match /proposals/{proposalId} {
+        allow read: if isMemberOf(orgId);
+        allow create, delete: if isEmployer(orgId);
+        allow update: if isEmployer(orgId) || (
+          isWorker(orgId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['workerResponses'])
+        );
+      }
+
+      // Attendance sessions
+      match /attendanceSessions/{sessionId} {
+        allow read: if isEmployer(orgId) || (isWorker(orgId) && resource.data.workerId == getUserData().workerId);
+        allow create: if isWorker(orgId) && request.resource.data.workerId == getUserData().workerId;
+        allow update: if isEmployer(orgId) || (
+          isWorker(orgId) &&
+          resource.data.workerId == getUserData().workerId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['endUtc', 'status', 'recordedMinutes', 'recordedPayPaise'])
+        );
+      }
+
+      // Audit Events: append-only by organisation members
+      match /auditEvents/{eventId} {
+        allow read: if isEmployer(orgId);
+        allow create: if isMemberOf(orgId) &&
+          request.resource.data.organisationId == orgId &&
+          request.resource.data.actorId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+  }
+}
