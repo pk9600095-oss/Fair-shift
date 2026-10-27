@@ -3,14 +3,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { User, GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut, onAuthStateChanged } from 'firebase/auth';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+} from 'react';
+import {
+  User,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut as firebaseSignOut,
+  onAuthStateChanged,
+} from 'firebase/auth';
 import { auth, testFirestoreConnection } from '../firebase/config.ts';
-import { UserRole, IndustryType, UserProfile } from '../domain/types.ts';
+import {
+  UserRole,
+  IndustryType,
+  UserProfile,
+} from '../domain/types.ts';
 import { SandboxDataset } from '../data/seedData.ts';
 
 interface AuthContextType {
-  // Real Firebase state
   currentUser: User | null;
   authLoading: boolean;
   firestoreConnected: boolean;
@@ -18,7 +33,6 @@ interface AuthContextType {
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
 
-  // Demo Sandbox state
   isDemoSession: boolean;
   enterDemo: (role?: UserRole) => void;
   exitDemo: () => void;
@@ -30,171 +44,417 @@ interface AuthContextType {
   setActiveSandboxWorkerId: (id: string) => void;
   sessionId: string;
 
-  // Active workspace state
   isAuthenticated: boolean;
   effectiveRole: UserRole;
   effectiveDisplayName: string;
   effectiveOrgName: string;
   sandboxData: SandboxDataset | null;
   refreshSandboxData: () => Promise<void>;
-  updateSandboxData: (updater: (prev: SandboxDataset) => SandboxDataset) => void;
+  updateSandboxData: (
+    updater: (prev: SandboxDataset) => SandboxDataset
+  ) => void;
   resetSandboxData: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+async function fetchJson(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 12000
+): Promise<any> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    timeoutMs
+  );
+
+  try {
+    const headers = new Headers(options.headers);
+    headers.set('Accept', 'application/json');
+
+    const response = await fetch(url, {
+      ...options,
+      headers,
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `${url.split('?')[0]} returned HTTP ${response.status}. ` +
+          'Check that the backend route is deployed and accessible.'
+      );
+    }
+
+    const contentType =
+      response.headers.get('content-type') || '';
+
+    if (
+      !contentType.toLowerCase().includes('application/json')
+    ) {
+      throw new Error(
+        `${url.split('?')[0]} returned a non-JSON response. ` +
+          'The request may be reaching the frontend instead of the backend.'
+      );
+    }
+
+    return await response.json();
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      error.name === 'AbortError'
+    ) {
+      throw new Error(
+        `${url.split('?')[0]} timed out after ${timeoutMs / 1000} seconds.`
+      );
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : 'An unexpected error occurred.';
+}
+
+export const AuthProvider: React.FC<{
+  children: React.ReactNode;
+}> = ({ children }) => {
+  const [currentUser, setCurrentUser] =
+    useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [firestoreConnected, setFirestoreConnected] = useState(false);
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [firestoreConnected, setFirestoreConnected] =
+    useState(false);
+  const [userProfile, setUserProfile] =
+    useState<UserProfile | null>(null);
 
-  // Demo Sandbox state (starts false so user lands on login page first)
   const [isDemoSession, setIsDemoSession] = useState(false);
-  const [sandboxRole, setSandboxRole] = useState<UserRole>('employer');
-  const [selectedIndustry, setSelectedIndustry] = useState<IndustryType>('construction');
-  const [sessionId] = useState(() => `judge-session-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`);
-  const [sandboxData, setSandboxData] = useState<SandboxDataset | null>(null);
-  const [activeSandboxWorkerId, setActiveSandboxWorkerId] = useState<string>('');
+  const [sandboxRole, setSandboxRole] =
+    useState<UserRole>('employer');
+  const [selectedIndustry, setSelectedIndustry] =
+    useState<IndustryType>('construction');
 
-  // Initialise Firebase auth state listener & firestore connection test
+  const [sessionId] = useState(
+    () =>
+      `judge-session-${Date.now()}-${Math.random()
+        .toString(36)
+        .substring(2, 7)}`
+  );
+
+  const [sandboxData, setSandboxData] =
+    useState<SandboxDataset | null>(null);
+  const [activeSandboxWorkerId, setActiveSandboxWorkerId] =
+    useState('');
+
+  const [workspaceError, setWorkspaceError] =
+    useState<string | null>(null);
+  const [workspaceLoading, setWorkspaceLoading] =
+    useState(false);
+  const [profileError, setProfileError] =
+    useState<string | null>(null);
+
   useEffect(() => {
-    testFirestoreConnection().then(setFirestoreConnected);
+    let active = true;
+    let authRevision = 0;
 
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setCurrentUser(user);
-      setAuthLoading(false);
+    Promise.resolve()
+      .then(() => testFirestoreConnection())
+      .then((connected) => {
+        if (active) {
+          setFirestoreConnected(connected);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('Firestore connection check failed:', error);
 
-      if (user) {
-        // Authenticated user: resolve role and organisation authoritatively on the server
+        if (active) {
+          setFirestoreConnected(false);
+        }
+      });
+
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      async (user) => {
+        const revision = ++authRevision;
+
+        if (!active) return;
+
+        setCurrentUser(user);
+        setUserProfile(null);
+        setProfileError(null);
+
+        if (!user) {
+          setAuthLoading(false);
+          return;
+        }
+
+        setAuthLoading(true);
+
         try {
           const idToken = await user.getIdToken();
-          const res = await fetch('/api/auth/resolve', {
+
+          if (!active || revision !== authRevision) return;
+
+          const data = await fetchJson('/api/auth/resolve', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               Authorization: `Bearer ${idToken}`,
             },
           });
-          if (res.ok) {
-            const data = await res.json();
-            setUserProfile({
-              id: user.uid,
-              organisationId: data.organisationId || 'org-production-1',
-              role: (data.role as UserRole) || 'employer',
-              email: user.email || '',
-              displayName: user.displayName || user.email?.split('@')[0] || '',
-            });
-          }
-        } catch (err) {
-          console.error('Server token verification error:', err);
-        }
-      } else {
-        setUserProfile(null);
-      }
-    });
 
-    return () => unsubscribe();
+          if (
+            !data ||
+            typeof data.organisationId !== 'string' ||
+            !data.organisationId.trim() ||
+            (data.role !== 'worker' &&
+              data.role !== 'employer')
+          ) {
+            throw new Error(
+              'The server did not return a valid workplace and role. ' +
+                'Access has not been granted.'
+            );
+          }
+
+          if (!active || revision !== authRevision) return;
+
+          setUserProfile({
+            id: user.uid,
+            organisationId: data.organisationId,
+            role: data.role as UserRole,
+            email: user.email || '',
+            displayName:
+              user.displayName ||
+              user.email?.split('@')[0] ||
+              'Member',
+          });
+        } catch (error: unknown) {
+          console.error('Server profile resolution failed:', error);
+
+          if (active && revision === authRevision) {
+            setUserProfile(null);
+            setProfileError(getErrorMessage(error));
+          }
+        } finally {
+          if (active && revision === authRevision) {
+            setAuthLoading(false);
+          }
+        }
+      },
+      (error) => {
+        console.error('Firebase authentication failed:', error);
+
+        if (active) {
+          setCurrentUser(null);
+          setUserProfile(null);
+          setProfileError(getErrorMessage(error));
+          setAuthLoading(false);
+        }
+      }
+    );
+
+    return () => {
+      active = false;
+      authRevision += 1;
+      unsubscribe();
+    };
   }, []);
 
-  // Fetch or refresh sandbox data for active industry & session
-  const refreshSandboxData = async () => {
+  const refreshSandboxData = useCallback(async () => {
+    setWorkspaceLoading(true);
+    setWorkspaceError(null);
+
     try {
-      const res = await fetch(`/api/sandbox/state?sessionId=${sessionId}&industry=${selectedIndustry}`);
-      if (res.ok) {
-        const json = await res.json();
-        setSandboxData(json.data);
-        if (json.data.workers?.length > 0 && !activeSandboxWorkerId) {
-          setActiveSandboxWorkerId(json.data.workers[0].id);
-        }
+      const query = new URLSearchParams({
+        sessionId,
+        industry: selectedIndustry,
+      });
+
+      const json = await fetchJson(
+        `/api/sandbox/state?${query.toString()}`
+      );
+
+      const dataset = json?.data;
+
+      if (
+        !dataset ||
+        !Array.isArray(dataset.workers) ||
+        !dataset.organisation ||
+        typeof dataset.organisation.name !== 'string'
+      ) {
+        throw new Error(
+          'The workspace API returned an unexpected dataset. ' +
+            'Expected data.workers and data.organisation.'
+        );
       }
-    } catch (err) {
-      console.error('Failed to fetch sandbox dataset:', err);
+
+      setSandboxData(dataset as SandboxDataset);
+
+      setActiveSandboxWorkerId((previousId) =>
+        dataset.workers.some(
+          (worker: { id: string }) =>
+            worker.id === previousId
+        )
+          ? previousId
+          : dataset.workers[0]?.id || ''
+      );
+    } catch (error: unknown) {
+      console.error('Workspace loading failed:', error);
+      setWorkspaceError(getErrorMessage(error));
+    } finally {
+      setWorkspaceLoading(false);
     }
-  };
+  }, [sessionId, selectedIndustry]);
 
   useEffect(() => {
-    if (isDemoSession || currentUser) {
-      refreshSandboxData();
+    if (isDemoSession || (currentUser && userProfile)) {
+      setSandboxData(null);
+      setActiveSandboxWorkerId('');
+      void refreshSandboxData();
     }
-  }, [selectedIndustry, sessionId, isDemoSession, currentUser]);
+  }, [
+    isDemoSession,
+    currentUser,
+    userProfile,
+    refreshSandboxData,
+  ]);
 
   useEffect(() => {
-    if (sandboxData?.workers && sandboxData.workers.length > 0) {
-      const workerExists = sandboxData.workers.some(w => w.id === activeSandboxWorkerId);
-      if (!workerExists) {
-        setActiveSandboxWorkerId(sandboxData.workers[0].id);
-      }
+    if (!sandboxData?.workers.length) return;
+
+    const workerExists = sandboxData.workers.some(
+      (worker) => worker.id === activeSandboxWorkerId
+    );
+
+    if (!workerExists) {
+      setActiveSandboxWorkerId(sandboxData.workers[0].id);
     }
   }, [sandboxData, activeSandboxWorkerId]);
 
-  const updateSandboxData = (updater: (prev: SandboxDataset) => SandboxDataset) => {
-    setSandboxData(prev => (prev ? updater(prev) : prev));
+  const updateSandboxData = (
+    updater: (prev: SandboxDataset) => SandboxDataset
+  ) => {
+    setSandboxData((previous) =>
+      previous ? updater(previous) : previous
+    );
   };
 
   const resetSandboxData = async () => {
+    setWorkspaceError(null);
+    setWorkspaceLoading(true);
+
     try {
-      await fetch('/api/sandbox/reset', {
+      const response = await fetch('/api/sandbox/reset', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, industry: selectedIndustry }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sessionId,
+          industry: selectedIndustry,
+        }),
+        signal: AbortSignal.timeout(12000),
       });
+
+      if (!response.ok) {
+        throw new Error(
+          `Sandbox reset returned HTTP ${response.status}.`
+        );
+      }
+
       await refreshSandboxData();
-    } catch (err) {
-      console.error('Failed to reset sandbox data:', err);
+    } catch (error: unknown) {
+      console.error('Sandbox reset failed:', error);
+      setWorkspaceError(getErrorMessage(error));
+    } finally {
+      setWorkspaceLoading(false);
     }
   };
 
   const handleSignInWithGoogle = async () => {
     const provider = new GoogleAuthProvider();
+
+    setProfileError(null);
+    setWorkspaceError(null);
+
     try {
       await signInWithPopup(auth, provider);
       setIsDemoSession(false);
-    } catch (err) {
-      console.error('Google Sign-In failed:', err);
-      throw err;
+    } catch (error: unknown) {
+      console.error('Google sign-in failed:', error);
+      throw error;
     }
   };
 
   const handleSignOut = async () => {
     try {
       await firebaseSignOut(auth);
-    } catch {
-      // ignore
+    } catch (error: unknown) {
+      console.error('Firebase sign-out failed:', error);
+      setProfileError(
+        'Sign-out failed. Please try again before leaving this device.'
+      );
+      return;
     }
+
     setCurrentUser(null);
     setUserProfile(null);
     setIsDemoSession(false);
     setSandboxRole('employer');
+    setSandboxData(null);
+    setActiveSandboxWorkerId('');
+    setWorkspaceError(null);
+    setProfileError(null);
   };
 
   const enterDemo = (role: UserRole = 'employer') => {
     setSandboxRole(role);
+    setWorkspaceError(null);
+    setProfileError(null);
+    setSandboxData(null);
+    setActiveSandboxWorkerId('');
     setIsDemoSession(true);
   };
 
   const exitDemo = () => {
     setIsDemoSession(false);
+    setSandboxData(null);
+    setActiveSandboxWorkerId('');
+    setWorkspaceError(null);
   };
 
-  const isAuthenticated = Boolean(currentUser) || isDemoSession;
+  const isAuthenticated =
+    isDemoSession || Boolean(currentUser && userProfile);
 
-  // Resolve effective role: if authenticated with Firebase, use server-resolved userProfile.role;
-  // If in demo sandbox, use simulated sandboxRole
-  const effectiveRole: UserRole = currentUser && userProfile
-    ? userProfile.role
-    : sandboxRole;
+  // Demo perspective is used only inside the demo workspace.
+  // Real authenticated access requires a server-resolved profile.
+  const effectiveRole: UserRole = isDemoSession
+    ? sandboxRole
+    : userProfile?.role || 'worker';
 
-  // Active simulated or real worker
-  const activeWorker = sandboxData?.workers.find(w => w.id === activeSandboxWorkerId);
+  const activeWorker = sandboxData?.workers.find(
+    (worker) => worker.id === activeSandboxWorkerId
+  );
 
-  const effectiveDisplayName: string = currentUser
-    ? userProfile?.displayName || currentUser.displayName || currentUser.email?.split('@')[0] || 'Member'
-    : effectiveRole === 'worker'
-    ? activeWorker?.displayName || 'Worker'
-    : 'Staffing Manager';
+  const effectiveDisplayName = isDemoSession
+    ? effectiveRole === 'worker'
+      ? activeWorker?.displayName || 'Worker'
+      : 'Staffing Manager'
+    : userProfile?.displayName ||
+      currentUser?.displayName ||
+      currentUser?.email?.split('@')[0] ||
+      'Member';
 
-  const effectiveOrgName: string = sandboxData?.organisation.name || 'FairShift Organization';
+  const effectiveOrgName =
+    sandboxData?.organisation.name || 'FairShift Organisation';
+
+  const visibleError =
+    workspaceError || (!isDemoSession ? profileError : null);
 
   return (
     <AuthContext.Provider
@@ -225,15 +485,101 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         resetSandboxData,
       }}
     >
+      {visibleError && (
+        <div
+          role="alert"
+          style={{
+            position: 'fixed',
+            left: 12,
+            right: 12,
+            bottom: 12,
+            zIndex: 9999,
+            maxWidth: 720,
+            margin: '0 auto',
+            padding: 16,
+            background: '#FFF5EB',
+            border: '2px solid #A63D24',
+            borderRadius: 4,
+            color: '#652A19',
+            fontFamily: 'system-ui, sans-serif',
+            fontSize: 14,
+            lineHeight: 1.5,
+            maxHeight: '45vh',
+            overflowY: 'auto',
+            overflowWrap: 'anywhere',
+          }}
+        >
+          <strong>FairShift could not finish loading.</strong>
+
+          <p style={{ margin: '8px 0 12px' }}>
+            {visibleError}
+          </p>
+
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 10,
+            }}
+          >
+            {workspaceError && (
+              <button
+                type="button"
+                disabled={workspaceLoading}
+                onClick={() => void refreshSandboxData()}
+                style={{
+                  padding: '8px 14px',
+                  border: '1px solid #652A19',
+                  borderRadius: 3,
+                  background: '#FFFDF5',
+                  color: '#652A19',
+                  cursor: workspaceLoading
+                    ? 'not-allowed'
+                    : 'pointer',
+                }}
+              >
+                {workspaceLoading ? 'Retrying...' : 'Retry'}
+              </button>
+            )}
+
+            {isDemoSession && (
+              <button
+                type="button"
+                onClick={exitDemo}
+                style={{
+                  padding: '8px 14px',
+                  border: '1px solid #652A19',
+                  borderRadius: 3,
+                  background: '#FFFDF5',
+                  color: '#652A19',
+                  cursor: 'pointer',
+                }}
+              >
+                Exit demo
+              </button>
+            )}
+
+            {!isDemoSession && (
+              <button
+                type="button"
+                onClick={() => void handleSignOut()}
+                style={{
+                  padding: '8px 14px',
+                  border: '1px solid #652A19',
+                  borderRadius: 3,
+                  background: '#FFFDF5',
+                  color: '#652A19',
+                  cursor: 'pointer',
+                }}
+              >
+                Sign out
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {children}
     </AuthContext.Provider>
   );
 };
-
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return ctx;
-}
